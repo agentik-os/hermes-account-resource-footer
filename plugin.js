@@ -204,10 +204,14 @@ function FooterControl() {
 
 let terminalOpenedThisRun = false
 
+function openFreshTerminal() {
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: '`', code: 'Backquote', ctrlKey: true, shiftKey: true, bubbles: true }))
+}
+
 function toggleTerminal() {
   if (!terminalOpenedThisRun) {
     terminalOpenedThisRun = true
-    newTerminal()
+    openFreshTerminal()
     return
   }
   if (typeof host.togglePane === 'function') {
@@ -217,8 +221,8 @@ function toggleTerminal() {
   window.dispatchEvent(new KeyboardEvent('keydown', { key: '`', code: 'Backquote', ctrlKey: true, bubbles: true }))
 }
 
-function newTerminal() {
-  window.dispatchEvent(new KeyboardEvent('keydown', { key: '`', code: 'Backquote', ctrlKey: true, shiftKey: true, bubbles: true }))
+function toggleThemeMode() {
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', code: 'KeyX', shiftKey: true, bubbles: true }))
 }
 
 export default {
@@ -240,14 +244,14 @@ export default {
       }
     })
     ctx.register({
-      id: 'new-terminal-titlebar',
+      id: 'theme-mode-titlebar',
       area: 'titleBar.tools.right',
       data: {
-        id: 'account-resource-footer.new-terminal',
-        label: 'New terminal',
-        actionId: 'view.newTerminal',
-        icon: jsx(Codicon, { name: 'add', size: '0.8rem' }),
-        onSelect: newTerminal
+        id: 'account-resource-footer.theme-mode',
+        label: 'Toggle light / dark theme',
+        actionId: 'appearance.toggleMode',
+        icon: jsx(Codicon, { name: 'color-mode', size: '0.82rem' }),
+        onSelect: toggleThemeMode
       }
     })
   }
