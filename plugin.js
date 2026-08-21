@@ -7,13 +7,14 @@ import {
   STATUSBAR_AREAS,
   useValue
 } from '@hermes/plugin-sdk'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'account-resource-footer'
 const REFRESH_RESOURCES_MS = 15_000
 const REFRESH_ACCOUNT_MS = 60_000
 const PROVIDERS = ['openai-codex', 'anthropic']
+let runtimeCtx = null
 
 const pct = value => (Number.isFinite(Number(value)) ? Math.max(0, Math.min(100, Math.round(Number(value)))) : null)
 const gib = value => (Number.isFinite(Number(value)) ? `${(Number(value) / 1024 ** 3).toFixed(1)} GB` : '—')
@@ -96,11 +97,25 @@ function FooterControl() {
   const connectionId = useValue(host.state.connectionId)
   const gateway = useValue(host.state.gateway)
   const usage = useValue(host.state.focusedUsage)
+  const profile = useValue(host.state.focusedSessionProfile)
   const [resources, setResources] = useState(null)
   const [account, setAccount] = useState(null)
   const [connections, setConnections] = useState([])
   const [accountsByProvider, setAccountsByProvider] = useState({})
   const [busy, setBusy] = useState(false)
+  const [oauthFlow, setOauthFlow] = useState(null)
+  const [oauthCode, setOauthCode] = useState('')
+  const oauthFlowRef = useRef(null)
+  const oauthGeneration = useRef(0)
+  const mountedRef = useRef(true)
+
+  useEffect(() => {
+    oauthFlowRef.current = oauthFlow
+  }, [oauthFlow])
+
+  useEffect(() => {
+    oauthGeneration.current += 1
+  }, [connectionId, profile])
 
   const refreshResources = async () => {
     try { setResources(await host.request('system.resources', {})) } catch { setResources(null) }
@@ -152,6 +167,217 @@ function FooterControl() {
     } finally { setBusy(false) }
   }
 
+  const requestFlow = (flow, method, params = {}) => host.requestProfile(flow.route, method, params)
+
+  const beginOauth = async provider => {
+    const generation = ++oauthGeneration.current
+    setBusy(true)
+    try {
+      const targetProfile = profile || 'default'
+      const activeConnection = connectionId || host.activeConnectionId?.()
+      const routes = await host.profileRoutes()
+      const route = routes.find(item =>
+        item.connectionId === activeConnection &&
+        (item.targetProfile === targetProfile || item.profile === targetProfile)
+      )
+      if (!route) throw new Error('The active gateway route is unavailable.')
+      const flow = await host.requestProfile(route, 'auth.oauth.start', {
+        provider,
+        profile: route.targetProfile || targetProfile
+      })
+      const currentConnection = host.state.connectionId.get() || host.activeConnectionId?.() || null
+      const currentProfile = host.state.focusedSessionProfile.get() || 'default'
+      if (
+        !mountedRef.current ||
+        oauthGeneration.current !== generation ||
+        currentConnection !== route.connectionId ||
+        currentProfile !== (route.profile || targetProfile)
+      ) {
+        void host.requestProfile(route, 'auth.oauth.cancel', {
+          provider,
+          profile: route.targetProfile || targetProfile,
+          session_id: flow.session_id
+        }).catch(() => undefined)
+        return
+      }
+      const next = {
+        ...flow,
+        provider,
+        routeProfile: route.profile || targetProfile,
+        targetProfile: route.targetProfile || targetProfile,
+        connectionId: route.connectionId,
+        route,
+        status: 'pending'
+      }
+      setOauthFlow(next)
+      setOauthCode('')
+      const url = flow?.verification_url || flow?.auth_url
+      if (url && runtimeCtx?.os?.openExternal) await runtimeCtx.os.openExternal(url)
+    } catch (error) {
+      if (mountedRef.current && oauthGeneration.current === generation) {
+        host.notify({ kind: 'error', message: error instanceof Error ? error.message : `Could not reconnect ${providerLabel(provider)}.` })
+      }
+    } finally {
+      if (mountedRef.current && oauthGeneration.current === generation) setBusy(false)
+    }
+  }
+
+  const submitOauth = async () => {
+    if (!oauthFlow || !oauthCode.trim()) return
+    const activeFlow = oauthFlow
+    setBusy(true)
+    try {
+      const result = await requestFlow(activeFlow, 'auth.oauth.submit', {
+        provider: activeFlow.provider,
+        profile: activeFlow.targetProfile || undefined,
+        session_id: activeFlow.session_id,
+        code: oauthCode.trim()
+      })
+      if (oauthFlowRef.current?.session_id !== activeFlow.session_id) return
+      if (result?.status !== 'approved') {
+        setOauthFlow(current => current ? { ...current, status: result?.status || 'error' } : current)
+        host.notify({ kind: 'error', message: `${providerLabel(activeFlow.provider)} authorization was not approved.` })
+        return
+      }
+      setOauthFlow(null)
+      setOauthCode('')
+      await refreshAccount()
+      host.notify({ kind: 'success', message: `${providerLabel(activeFlow.provider)} connected.` })
+    } catch (error) {
+      host.notify({ kind: 'error', message: error instanceof Error ? error.message : 'Could not submit the authorization code.' })
+    } finally { setBusy(false) }
+  }
+
+  const cancelOauth = async () => {
+    if (!oauthFlow) return
+    const activeFlow = oauthFlow
+    try {
+      const result = await requestFlow(activeFlow, 'auth.oauth.cancel', {
+        provider: activeFlow.provider,
+        profile: activeFlow.targetProfile || undefined,
+        session_id: activeFlow.session_id
+      })
+      if (oauthFlowRef.current?.session_id !== activeFlow.session_id) return
+      if (result?.status === 'approved') {
+        setOauthFlow(null)
+        setOauthCode('')
+        await refreshAccount()
+        host.notify({ kind: 'success', message: `${providerLabel(activeFlow.provider)} connected before cancellation completed.` })
+        return
+      }
+      if (result?.status !== 'cancelled') {
+        setOauthFlow(current => current ? { ...current, status: result?.status || 'error' } : current)
+        return
+      }
+    } catch {
+      if (oauthFlowRef.current?.session_id === activeFlow.session_id) {
+        setOauthFlow(current => current ? { ...current, status: 'error' } : current)
+      }
+      return
+    }
+    setOauthFlow(null)
+    setOauthCode('')
+  }
+
+  useEffect(() => {
+    if (!oauthFlow || oauthFlow.flow !== 'device_code' || oauthFlow.status !== 'pending') return
+    const activeFlow = oauthFlow
+    let stopped = false
+    let failures = 0
+    let timer = null
+    const delay = Math.max(2000, Number(activeFlow.poll_interval || 5) * 1000)
+    const schedule = () => {
+      if (!stopped) timer = setTimeout(() => { void poll() }, delay)
+    }
+    const poll = async () => {
+      try {
+        const result = await requestFlow(activeFlow, 'auth.oauth.poll', {
+          provider: activeFlow.provider,
+          profile: activeFlow.targetProfile || undefined,
+          session_id: activeFlow.session_id
+        })
+        if (stopped || oauthFlowRef.current?.session_id !== activeFlow.session_id) return
+        failures = 0
+        if (result?.status === 'approved') {
+          setOauthFlow(null)
+          await refreshAccount()
+          host.notify({ kind: 'success', message: `${providerLabel(activeFlow.provider)} connected.` })
+          return
+        }
+        if (['error', 'cancelled', 'denied', 'expired'].includes(result?.status)) {
+          setOauthFlow(current => current ? { ...current, status: result.status } : current)
+          return
+        }
+      } catch {
+        failures += 1
+        if (!stopped && failures >= 3) {
+          setOauthFlow(current => current ? { ...current, status: 'error' } : current)
+          return
+        }
+      }
+      schedule()
+    }
+    void poll()
+    return () => { stopped = true; if (timer) clearTimeout(timer) }
+  }, [oauthFlow?.session_id, oauthFlow?.status])
+
+  useEffect(() => {
+    if (!oauthFlow) return
+    const currentConnection = connectionId || host.activeConnectionId?.() || null
+    const currentProfile = profile || 'default'
+    if (oauthFlow.connectionId === currentConnection && oauthFlow.routeProfile === currentProfile) return
+    const stale = oauthFlow
+    setOauthFlow(null)
+    setOauthCode('')
+    void requestFlow(stale, 'auth.oauth.cancel', {
+      provider: stale.provider,
+      profile: stale.targetProfile || undefined,
+      session_id: stale.session_id
+    }).catch(() => undefined)
+  }, [connectionId, profile, oauthFlow?.session_id])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      oauthGeneration.current += 1
+      const active = oauthFlowRef.current
+      if (!active || active.status !== 'pending') return
+      void requestFlow(active, 'auth.oauth.cancel', {
+        provider: active.provider,
+        profile: active.targetProfile || undefined,
+        session_id: active.session_id
+      }).catch(() => undefined)
+      oauthFlowRef.current = null
+    }
+  }, [])
+
+  const oauthPanel = oauthFlow ? jsxs('div', {
+    style: { display: 'grid', gap: 8, padding: 9, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 10 },
+    children: [
+      jsxs('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 }, children: [
+        jsx('strong', { children: `Connect ${providerLabel(oauthFlow.provider)}` }),
+        jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: oauthFlow.status || 'pending' })
+      ] }),
+      oauthFlow.user_code ? jsxs('div', { children: [
+        jsx('div', { style: { color: 'var(--ui-text-tertiary)' }, children: 'Enter this code in the browser:' }),
+        jsx('code', { style: { display: 'block', marginTop: 4, fontSize: '0.9rem', letterSpacing: '0.12em' }, children: oauthFlow.user_code })
+      ] }) : null,
+      oauthFlow.flow === 'pkce' ? jsx('input', {
+        value: oauthCode,
+        onChange: event => setOauthCode(event.target.value),
+        placeholder: 'Paste the Claude authorization code',
+        'aria-label': 'Claude authorization code',
+        style: { minHeight: 32, padding: '5px 8px', borderRadius: 8, border: '1px solid var(--ui-stroke-secondary)', background: 'var(--ui-editor-background)', color: 'var(--ui-text-primary)' }
+      }) : null,
+      jsxs('div', { style: { display: 'flex', gap: 7 }, children: [
+        oauthFlow.user_code ? quietButton('Copy code', () => { void runtimeCtx?.os?.writeClipboard?.(oauthFlow.user_code) }) : null,
+        oauthFlow.flow === 'pkce' ? quietButton('Connect', () => { void submitOauth() }, busy || !oauthCode.trim()) : null,
+        quietButton('Cancel', () => { void cancelOauth() }, busy)
+      ] })
+    ]
+  }) : null
+
   return jsxs(Popover, {
     children: [
       jsx(PopoverTrigger, {
@@ -191,9 +417,11 @@ function FooterControl() {
             ] }),
             jsx('div', { style: { height: 1, background: 'var(--ui-stroke-secondary)' } }),
             jsx(AccountRows, { accountsByProvider, onUse: useAccount }),
-            jsxs('div', { style: { display: 'flex', gap: 7 }, children: [
+            oauthPanel,
+            jsxs('div', { style: { display: 'flex', gap: 7, flexWrap: 'wrap' }, children: [
               quietButton('Refresh', () => { void refreshResources(); void refreshAccount() }, busy),
-              quietButton('Reconnect / add account', () => host.navigate('/settings?tab=providers'))
+              quietButton('Connect OpenAI', () => { void beginOauth('openai-codex') }, busy || Boolean(oauthFlow)),
+              quietButton('Connect Claude', () => { void beginOauth('anthropic') }, busy || Boolean(oauthFlow))
             ] })
           ]
         })
@@ -231,7 +459,13 @@ export default {
   description: 'Gateway-scoped account quota, context, CPU, RAM, disk, account switching and reconnect access.',
   defaultEnabled: true,
   register(ctx) {
+    runtimeCtx = ctx
+    ctx.onDispose(() => { if (runtimeCtx === ctx) runtimeCtx = null })
     ctx.register({ id: 'footer', area: STATUSBAR_AREAS.right, order: 35, render: () => jsx(FooterControl, {}) })
+    const nativeControls = document.querySelector(
+      'button[aria-label="Switch to light theme"], button[aria-label="Switch to dark theme"]'
+    )
+    if (nativeControls) return
     ctx.register({
       id: 'terminal-titlebar',
       area: 'titleBar.tools.right',
