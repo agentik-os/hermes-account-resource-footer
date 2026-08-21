@@ -232,27 +232,31 @@ export default {
   defaultEnabled: true,
   register(ctx) {
     ctx.register({ id: 'footer', area: STATUSBAR_AREAS.right, order: 35, render: () => jsx(FooterControl, {}) })
-    ctx.register({
-      id: 'terminal-titlebar',
-      area: 'titleBar.tools.right',
-      data: {
-        id: 'account-resource-footer.terminal',
-        label: 'Toggle terminal',
-        actionId: 'view.showTerminal',
-        icon: jsx(Codicon, { name: 'terminal', size: '0.85rem' }),
-        onSelect: toggleTerminal
-      }
-    })
-    ctx.register({
-      id: 'theme-mode-titlebar',
-      area: 'titleBar.tools.right',
-      data: {
-        id: 'account-resource-footer.theme-mode',
-        label: 'Toggle light / dark theme',
-        actionId: 'appearance.toggleMode',
-        icon: jsx(Codicon, { name: 'color-mode', size: '0.82rem' }),
-        onSelect: toggleThemeMode
-      }
-    })
+    if (!document.querySelector('button[aria-label="Toggle terminal"]')) {
+      ctx.register({
+        id: 'terminal-titlebar',
+        area: 'titleBar.tools.right',
+        data: {
+          id: 'account-resource-footer.terminal',
+          label: 'Toggle terminal',
+          actionId: 'view.showTerminal',
+          icon: jsx(Codicon, { name: 'terminal', size: '0.85rem' }),
+          onSelect: toggleTerminal
+        }
+      })
+    }
+    if (!document.querySelector('button[aria-label*="theme" i]')) {
+      ctx.register({
+        id: 'theme-mode-titlebar',
+        area: 'titleBar.tools.right',
+        data: {
+          id: 'account-resource-footer.theme-mode',
+          label: 'Toggle light / dark theme',
+          actionId: 'appearance.toggleMode',
+          icon: jsx(Codicon, { name: 'color-mode', size: '0.82rem' }),
+          onSelect: toggleThemeMode
+        }
+      })
+    }
   }
 }
