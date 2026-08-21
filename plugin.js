@@ -211,8 +211,6 @@ function FooterControl() {
       }
       setOauthFlow(next)
       setOauthCode('')
-      const url = flow?.verification_url || flow?.auth_url
-      if (url && runtimeCtx?.os?.openExternal) await runtimeCtx.os.openExternal(url)
     } catch (error) {
       if (mountedRef.current && oauthGeneration.current === generation) {
         host.notify({ kind: 'error', message: error instanceof Error ? error.message : `Could not reconnect ${providerLabel(provider)}.` })
@@ -223,7 +221,7 @@ function FooterControl() {
   }
 
   const submitOauth = async () => {
-    if (!oauthFlow || !oauthCode.trim()) return
+    if (!oauthFlow || oauthFlow.flow !== 'pkce' || !oauthCode.trim()) return
     const activeFlow = oauthFlow
     setBusy(true)
     try {
@@ -352,34 +350,91 @@ function FooterControl() {
     }
   }, [])
 
-  const oauthPanel = oauthFlow ? jsxs('div', {
-    style: { display: 'grid', gap: 8, padding: 9, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 10 },
-    children: [
-      jsxs('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 8 }, children: [
-        jsx('strong', { children: `Connect ${providerLabel(oauthFlow.provider)}` }),
-        jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: oauthFlow.status || 'pending' })
-      ] }),
-      oauthFlow.user_code ? jsxs('div', { children: [
-        jsx('div', { style: { color: 'var(--ui-text-tertiary)' }, children: 'Enter this code in the browser:' }),
-        jsx('code', { style: { display: 'block', marginTop: 4, fontSize: '0.9rem', letterSpacing: '0.12em' }, children: oauthFlow.user_code })
-      ] }) : null,
-      oauthFlow.flow === 'pkce' ? jsx('input', {
-        value: oauthCode,
-        onChange: event => setOauthCode(event.target.value),
-        placeholder: 'Paste the Claude authorization code',
-        'aria-label': 'Claude authorization code',
-        style: { minHeight: 32, padding: '5px 8px', borderRadius: 8, border: '1px solid var(--ui-stroke-secondary)', background: 'var(--ui-editor-background)', color: 'var(--ui-text-primary)' }
-      }) : null,
-      jsxs('div', { style: { display: 'flex', gap: 7 }, children: [
-        oauthFlow.user_code ? quietButton('Copy code', () => { void runtimeCtx?.os?.writeClipboard?.(oauthFlow.user_code) }) : null,
-        oauthFlow.flow === 'pkce' ? quietButton('Connect', () => { void submitOauth() }, busy || !oauthCode.trim()) : null,
+  const openOauthUrl = async () => {
+    const url = oauthFlow?.verification_url || oauthFlow?.auth_url
+    if (!url || !runtimeCtx?.os?.openExternal) return
+    try {
+      const opened = await runtimeCtx.os.openExternal(url)
+      if (!opened) throw new Error('The system browser did not accept the authorization URL.')
+    } catch (error) {
+      host.notify({ kind: 'error', message: error instanceof Error ? error.message : 'Could not open the authorization page.' })
+    }
+  }
+
+  const pasteOauthCode = async () => {
+    try {
+      const value = await navigator.clipboard.readText()
+      if (value) setOauthCode(value.trim())
+    } catch {
+      host.notify({ kind: 'warning', message: 'Clipboard access is unavailable. Paste the code manually.' })
+    }
+  }
+
+  const expectsPastedCode = Boolean(oauthFlow?.flow === 'pkce')
+  const oauthModal = oauthFlow ? jsx('div', {
+    role: 'presentation',
+    style: {
+      position: 'fixed', inset: 0, zIndex: 2147483000, display: 'grid', placeItems: 'center',
+      padding: 20, background: 'rgb(0 0 0 / 42%)'
+    },
+    children: jsxs('div', {
+      role: 'dialog',
+      'aria-modal': true,
+      'aria-label': `Connect ${providerLabel(oauthFlow.provider)}`,
+      style: {
+        position: 'relative', display: 'grid', gap: 13, width: 'min(460px, calc(100vw - 40px))',
+        padding: 18, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 16,
+        background: 'var(--theme-elevated-seed, var(--dt-background))', color: 'var(--ui-text-primary)',
+        boxShadow: '0 20px 60px rgb(0 0 0 / 28%)', fontSize: '0.78rem'
+      },
+      children: [
+        jsx('button', {
+          type: 'button', 'aria-label': 'Close authorization', onClick: () => { void cancelOauth() },
+          style: { position: 'absolute', top: 10, right: 10, display: 'grid', placeItems: 'center', width: 28, height: 28, border: 0, borderRadius: 8, background: 'transparent', color: 'var(--ui-text-secondary)', cursor: 'pointer', fontSize: '1.1rem' },
+          children: '×'
+        }),
+        jsxs('div', { style: { paddingRight: 28 }, children: [
+          jsx('strong', { style: { display: 'block', fontSize: '0.98rem' }, children: `Connect ${providerLabel(oauthFlow.provider)}` }),
+          jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: oauthFlow.status || 'pending' })
+        ] }),
+        jsx('div', {
+          style: { color: 'var(--ui-text-secondary)', lineHeight: 1.5 },
+          children: oauthFlow.user_code
+            ? 'Open the authorization page, sign in, then enter the one-time code shown below in the website.'
+            : 'Open the authorization page, sign in, then copy the code shown by the website and paste it below.'
+        }),
+        quietButton('Open authorization page', openOauthUrl, busy),
+        oauthFlow.user_code ? jsxs('div', {
+          style: { display: 'grid', gap: 7, padding: 11, borderRadius: 10, background: 'var(--ui-bg-quaternary)' },
+          children: [
+            jsx('span', { style: { color: 'var(--ui-text-tertiary)' }, children: 'Code to enter in the website' }),
+            jsx('code', { style: { fontSize: '1rem', letterSpacing: '0.12em', userSelect: 'all' }, children: oauthFlow.user_code }),
+            quietButton('Copy code', () => { void runtimeCtx?.os?.writeClipboard?.(oauthFlow.user_code) })
+          ]
+        }) : null,
+        expectsPastedCode ? jsxs('div', { style: { display: 'grid', gap: 7 }, children: [
+          jsx('label', { htmlFor: 'hermes-oauth-code', style: { color: 'var(--ui-text-tertiary)' }, children: 'Authorization code from the website' }),
+          jsx('input', {
+            id: 'hermes-oauth-code', value: oauthCode, autoFocus: true,
+            onChange: event => setOauthCode(event.target.value),
+            placeholder: `Paste the ${providerLabel(oauthFlow.provider)} authorization code`,
+            'aria-label': `${providerLabel(oauthFlow.provider)} authorization code`,
+            style: { minHeight: 38, padding: '7px 9px', borderRadius: 9, border: '1px solid var(--ui-stroke-secondary)', background: 'var(--ui-editor-background)', color: 'var(--ui-text-primary)' }
+          }),
+          jsxs('div', { style: { display: 'flex', gap: 7, flexWrap: 'wrap' }, children: [
+            quietButton('Paste', () => { void pasteOauthCode() }, busy),
+            quietButton('Connect', () => { void submitOauth() }, busy || !oauthCode.trim())
+          ] })
+        ] }) : null,
         quietButton('Cancel', () => { void cancelOauth() }, busy)
-      ] })
-    ]
+      ]
+    })
   }) : null
 
-  return jsxs(Popover, {
-    children: [
+  return jsxs('div', {
+    style: { display: 'contents' },
+    children: [jsxs(Popover, {
+      children: [
       jsx(PopoverTrigger, {
         asChild: true,
         children: jsxs('button', {
@@ -417,7 +472,6 @@ function FooterControl() {
             ] }),
             jsx('div', { style: { height: 1, background: 'var(--ui-stroke-secondary)' } }),
             jsx(AccountRows, { accountsByProvider, onUse: useAccount }),
-            oauthPanel,
             jsxs('div', { style: { display: 'flex', gap: 7, flexWrap: 'wrap' }, children: [
               quietButton('Refresh', () => { void refreshResources(); void refreshAccount() }, busy),
               quietButton('Connect OpenAI', () => { void beginOauth('openai-codex') }, busy || Boolean(oauthFlow)),
@@ -427,6 +481,7 @@ function FooterControl() {
         })
       })
     ]
+    }), oauthModal]
   })
 }
 

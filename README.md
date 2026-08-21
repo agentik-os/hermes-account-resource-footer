@@ -8,7 +8,10 @@ Shows:
 - focused session context usage;
 - CPU, RAM, disk, hostname and gateway connection state;
 - redacted Hermes credential-pool accounts for Claude and OpenAI Codex;
-- account prioritization and a safe reconnect link to Hermes Providers settings.
+- account prioritization and route-pinned Claude/OpenAI reconnect flows;
+- a fixed authorization modal that remains mounted while the browser is open,
+  supports both device-code and pasted callback-code directions, and closes only
+  through its explicit close/cancel control.
 
 The renderer never receives API keys, OAuth tokens, credential files, process
 lists, usernames or filesystem paths. All metrics and quota probes execute on
